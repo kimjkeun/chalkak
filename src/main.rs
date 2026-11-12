@@ -9,24 +9,26 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::WindowId;
 
-use capture_tool::autostart;
-use capture_tool::capture::{self, Rect};
-use capture_tool::config::{self, Config};
-use capture_tool::output::{self, CopyMode};
-use capture_tool::overlay::{Canvas, Outcome, Overlay};
-use capture_tool::{capture_canvas, crop_from_canvas, ocr, state};
+use chalkak::autostart;
+use chalkak::capture::{self, Rect};
+use chalkak::config::{self, Config};
+use chalkak::output::{self, CopyMode};
+use chalkak::overlay::{Canvas, Outcome, Overlay};
+use chalkak::{capture_canvas, crop_from_canvas, ocr, state};
 
 const USAGE: &str = "\
+찰칵 (chalkak) - 화면 캡쳐 도구
+
 사용법:
-  capture_tool region [옵션]     드래그로 영역을 선택해 캡쳐 (Esc/오른쪽 클릭: 취소)
-  capture_tool again [옵션]      직전에 선택한 영역을 그대로 다시 캡쳐
-  capture_tool full [옵션]       주 모니터 전체를 캡쳐
-  capture_tool ocr <이미지 파일>  이미지의 글자를 읽어 출력
-  capture_tool monitors          연결된 모니터 목록 출력
-  capture_tool autostart <on|off|status>
+  chalkak region [옵션]     드래그로 영역을 선택해 캡쳐 (Esc/오른쪽 클릭: 취소)
+  chalkak again [옵션]      직전에 선택한 영역을 그대로 다시 캡쳐
+  chalkak full [옵션]       주 모니터 전체를 캡쳐
+  chalkak ocr <이미지 파일>  이미지의 글자를 읽어 출력
+  chalkak monitors          연결된 모니터 목록 출력
+  chalkak autostart <on|off|status>
                                  Windows 시작 시 트레이 프로그램 자동 실행
-  capture_tool config            설정 파일 위치 출력
-  capture_tool install           고정 위치에 설치하고 그곳의 트레이 프로그램을 실행
+  chalkak config            설정 파일 위치 출력
+  chalkak install           고정 위치에 설치하고 그곳의 트레이 프로그램을 실행
 
 옵션:
   --out <파일>              저장할 파일 (png, jpg). 생략하면 설정의 저장 폴더에
@@ -36,7 +38,7 @@ const USAGE: &str = "\
 저장된 파일 경로를 표준 출력에 씁니다. 선택을 취소하면 아무것도 쓰지 않고
 종료 코드 1로 끝납니다.
 
-단축키와 트레이 아이콘으로 쓰려면 capture_tool_tray 를 실행하세요.";
+단축키와 트레이 아이콘으로 쓰려면 chalkak_tray 를 실행하세요.";
 
 struct Options {
     out: Option<PathBuf>,
@@ -45,7 +47,7 @@ struct Options {
 }
 
 fn main() -> Result<()> {
-    capture_tool::make_dpi_aware();
+    chalkak::make_dpi_aware();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first() else {
         println!("{USAGE}");
@@ -139,10 +141,10 @@ fn finish(image: &RgbaImage, opts: &Options) -> Result<()> {
     Ok(())
 }
 
-/// 두 프로그램을 `%LOCALAPPDATA%\capture_tool\bin`에 복사하고 그곳의 트레이 프로그램을 실행한다.
+/// 두 프로그램을 `%LOCALAPPDATA%\chalkak\bin`에 복사하고 그곳의 트레이 프로그램을 실행한다.
 /// 빌드 폴더를 지우거나 다시 빌드해도 쓰던 프로그램이 영향을 받지 않게 된다.
 fn install() -> Result<()> {
-    const FILES: [&str; 2] = ["capture_tool.exe", "capture_tool_tray.exe"];
+    const FILES: [&str; 2] = ["chalkak.exe", "chalkak_tray.exe"];
     let source = std::env::current_exe()
         .context("실행 파일 위치를 알 수 없습니다")?
         .parent()
@@ -151,12 +153,12 @@ fn install() -> Result<()> {
     let target = directories::BaseDirs::new()
         .context("사용자 폴더를 찾지 못했습니다")?
         .data_local_dir()
-        .join("capture_tool")
+        .join("chalkak")
         .join("bin");
     std::fs::create_dir_all(&target)
         .with_context(|| format!("폴더를 만들지 못했습니다: {}", target.display()))?;
     if std::fs::canonicalize(&source)? == std::fs::canonicalize(&target)? {
-        bail!("이미 설치된 위치에서 실행 중입니다. 새로 빌드한 폴더의 capture_tool 로 실행하세요.");
+        bail!("이미 설치된 위치에서 실행 중입니다. 새로 빌드한 폴더의 chalkak 로 실행하세요.");
     }
     for name in FILES {
         if !source.join(name).exists() {
@@ -167,7 +169,7 @@ fn install() -> Result<()> {
 
     // 실행 중인 트레이 프로그램은 파일을 잡고 있으므로 먼저 끝낸다.
     let _ = std::process::Command::new("taskkill")
-        .args(["/IM", "capture_tool_tray.exe", "/F"])
+        .args(["/IM", "chalkak_tray.exe", "/F"])
         .output();
     for name in FILES {
         let mut tries = 0;
@@ -182,7 +184,7 @@ fn install() -> Result<()> {
             }
         }
     }
-    let tray = target.join("capture_tool_tray.exe");
+    let tray = target.join("chalkak_tray.exe");
     if had_autostart {
         autostart::enable(&tray)?;
     }

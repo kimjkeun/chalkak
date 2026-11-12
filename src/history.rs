@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn recent_lists_newest_first_and_ignores_other_files() {
-        let dir = std::env::temp_dir().join(format!("capture_tool_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("chalkak_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         for name in [
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn recent_on_missing_dir_is_empty() {
-        let dir = std::env::temp_dir().join("capture_tool_test_does_not_exist");
+        let dir = std::env::temp_dir().join("chalkak_test_does_not_exist");
         assert!(recent(&dir, 5).unwrap().is_empty());
     }
 

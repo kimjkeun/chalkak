@@ -128,7 +128,7 @@ impl Overlay {
     pub fn open(event_loop: &ActiveEventLoop, canvas: &Canvas) -> Result<Self> {
         let Rect { x, y, width, height } = canvas.bounds;
         let attrs = Window::default_attributes()
-            .with_title("capture_tool")
+            .with_title("찰칵")
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
@@ -358,7 +358,7 @@ impl Overlay {
 }
 
 /// 가상 데스크톱에서의 현재 커서 위치 (물리 픽셀).
-fn cursor_position() -> Option<(i32, i32)> {
+pub fn cursor_position() -> Option<(i32, i32)> {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut point = POINT { x: 0, y: 0 };

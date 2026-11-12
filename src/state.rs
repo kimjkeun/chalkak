@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::capture::Rect;
 
 fn last_region_path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "capture_tool")
+    let dirs = directories::ProjectDirs::from("", "", "chalkak")
         .context("프로그램 데이터 폴더를 찾지 못했습니다")?;
     Ok(dirs.data_local_dir().join("last_region.txt"))
 }

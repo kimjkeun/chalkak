@@ -7,8 +7,8 @@ use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const VALUE_NAME: &str = "capture_tool";
-const TRAY_EXE: &str = "capture_tool_tray.exe";
+const VALUE_NAME: &str = "chalkak";
+const TRAY_EXE: &str = "chalkak_tray.exe";
 
 /// 지금 실행 중인 프로그램과 같은 폴더에 있는 트레이 프로그램.
 pub fn tray_exe() -> Result<PathBuf> {

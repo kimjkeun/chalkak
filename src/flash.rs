@@ -30,7 +30,7 @@ impl Flash {
     pub fn show(event_loop: &ActiveEventLoop, x: i32, y: i32, image: &RgbaImage) -> Result<Self> {
         let (width, height) = image.dimensions();
         let attrs = Window::default_attributes()
-            .with_title("capture_tool")
+            .with_title("찰칵")
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)

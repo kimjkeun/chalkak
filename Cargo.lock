@@ -341,28 +341,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "capture_tool"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "anyhow",
- "arboard",
- "chrono",
- "directories",
- "global-hotkey",
- "image",
- "serde",
- "softbuffer",
- "toml 1.2.1+spec-1.1.0",
- "tray-icon",
- "windows",
- "windows-sys 0.61.2",
- "winit",
- "winreg",
- "xcap",
-]
-
-[[package]]
 name = "cc"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -424,6 +402,28 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "rand_core",
+]
+
+[[package]]
+name = "chalkak"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "anyhow",
+ "arboard",
+ "chrono",
+ "directories",
+ "global-hotkey",
+ "image",
+ "serde",
+ "softbuffer",
+ "toml 1.2.1+spec-1.1.0",
+ "tray-icon",
+ "windows",
+ "windows-sys 0.61.2",
+ "winit",
+ "winreg",
+ "xcap",
 ]
 
 [[package]]

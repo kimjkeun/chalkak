@@ -1,0 +1,4 @@
+# C 런타임을 실행 파일 안에 넣는다. Visual C++ 재배포 패키지가 없는 PC에서도
+# 실행 파일만 복사해서 바로 쓸 수 있게 하기 위해서다.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

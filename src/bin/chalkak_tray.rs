@@ -18,16 +18,19 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::monitor::MonitorHandle;
 use winit::window::WindowId;
 
-use capture_tool::annotate::Font;
-use capture_tool::config::{self, Config};
-use capture_tool::flash::Flash;
-use capture_tool::history::{self, ThumbCache};
-use capture_tool::history_window::{HistoryOutcome, HistoryWindow};
-use capture_tool::output::{self, CopyMode};
-use capture_tool::overlay::{Canvas, Outcome, Overlay};
-use capture_tool::{autostart, capture, capture_canvas, crop_from_canvas, ocr, state};
+use chalkak::annotate::Font;
+use chalkak::config::{self, Config};
+use chalkak::flash::Flash;
+use chalkak::history::{self, ThumbCache};
+use chalkak::history_window::{HistoryOutcome, HistoryWindow};
+use chalkak::text_history::{self, TextHistory};
+use chalkak::text_history_window::{TextHistoryWindow, TextOutcome};
+use chalkak::output::{self, CopyMode};
+use chalkak::overlay::{self, Canvas, Outcome, Overlay};
+use chalkak::pin::PinWindow;
+use chalkak::{autostart, capture, capture_canvas, crop_from_canvas, ocr, state};
 
-const APP_NAME: &str = "capture_tool";
+const APP_NAME: &str = "찰칵";
 
 /// 메뉴가 닫히는 애니메이션이 캡쳐에 찍히지 않도록 기다리는 시간.
 const MENU_CLOSE_DELAY: Duration = Duration::from_millis(250);
@@ -39,6 +42,7 @@ enum Action {
     Again,
     Full,
     History,
+    TextHistory,
     OpenFolder,
     OpenConfig,
     ReloadConfig,
@@ -47,12 +51,13 @@ enum Action {
 }
 
 impl Action {
-    const ALL: [Action; 10] = [
+    const ALL: [Action; 11] = [
         Action::Region,
         Action::RegionEdit,
         Action::Again,
         Action::Full,
         Action::History,
+        Action::TextHistory,
         Action::OpenFolder,
         Action::OpenConfig,
         Action::ReloadConfig,
@@ -67,6 +72,7 @@ impl Action {
             Action::Again => "again",
             Action::Full => "full",
             Action::History => "history",
+            Action::TextHistory => "text_history",
             Action::OpenFolder => "open_folder",
             Action::OpenConfig => "open_config",
             Action::ReloadConfig => "reload_config",
@@ -86,6 +92,7 @@ impl Action {
             Action::Again => "같은 영역 다시 캡쳐",
             Action::Full => "주 모니터 전체 캡쳐",
             Action::History => "캡쳐 히스토리",
+            Action::TextHistory => "복사한 텍스트 히스토리",
             Action::OpenFolder => "저장 폴더 열기",
             Action::OpenConfig => "설정 파일 열기",
             Action::ReloadConfig => "설정 다시 불러오기",
@@ -101,6 +108,7 @@ impl Action {
             Action::RegionEdit => &config.hotkeys.region_edit,
             Action::Again => &config.hotkeys.again,
             Action::History => &config.hotkeys.history,
+            Action::TextHistory => &config.hotkeys.text_history,
             _ => return None,
         };
         Some(text.trim()).filter(|t| !t.is_empty())
@@ -125,13 +133,15 @@ enum AppEvent {
     Run(Action),
     /// 트레이 메뉴에서 고름: 메뉴가 사라진 뒤 실행.
     RunFromMenu(Action),
+    /// 클립보드 내용이 바뀌었다.
+    ClipboardChanged,
 }
 
 /// 등록된 단축키 ID와 동작의 대응표. 단축키 이벤트 처리기와 함께 쓴다.
 type HotkeyTable = Arc<Mutex<Vec<(u32, Action)>>>;
 
 fn main() {
-    capture_tool::make_dpi_aware();
+    chalkak::make_dpi_aware();
     if let Err(e) = run() {
         show_error(&format!("{e:#}"));
     }
@@ -186,6 +196,17 @@ fn run() -> Result<()> {
         }
     }));
 
+    let proxy = event_loop.create_proxy();
+    text_history::spawn_watcher(move || {
+        let _ = proxy.send_event(AppEvent::ClipboardChanged);
+    });
+
+    let mut texts = TextHistory::new(config.text_history_size);
+    // 시작할 때 이미 클립보드에 있던 텍스트도 넣어 둔다.
+    if let Some(text) = text_history::read_clipboard_text() {
+        texts.push(text);
+    }
+
     let mut app = App {
         config,
         hotkey_manager: GlobalHotKeyManager::new().context("단축키 관리자를 만들지 못했습니다")?,
@@ -196,9 +217,13 @@ fn run() -> Result<()> {
         selecting: None,
         edit_after_capture: false,
         flash: None,
+        pins: Vec::new(),
         history: None,
         thumbs: ThumbCache::default(),
         font: None,
+        texts,
+        text_window: None,
+        paste_target: 0,
     };
     app.apply_hotkeys();
     event_loop.run_app(&mut app).context("이벤트 루프 오류")
@@ -218,11 +243,18 @@ struct App {
     edit_after_capture: bool,
     /// 캡쳐 직후 잠깐 떠 있는 번쩍임.
     flash: Option<Flash>,
+    /// 화면 위에 띄워 둔 캡쳐들.
+    pins: Vec<PinWindow>,
     /// 열려 있는 히스토리 창과, 거기 보이는 파일들(보이는 순서대로).
     history: Option<(HistoryWindow, Vec<PathBuf>)>,
     thumbs: ThumbCache,
     /// 히스토리 창의 글자용 글꼴. 처음 열 때 읽는다.
     font: Option<Rc<Font>>,
+    /// 복사한 텍스트의 히스토리.
+    texts: TextHistory,
+    text_window: Option<TextHistoryWindow>,
+    /// 텍스트 히스토리 창을 열기 전에 앞에 있던 창. 고른 텍스트를 여기에 붙여 넣는다.
+    paste_target: isize,
 }
 
 impl App {
@@ -271,6 +303,16 @@ impl App {
         if self.selecting.is_some() && action != Action::Quit {
             return;
         }
+        // 텍스트 히스토리는 다른 창(편집기 등)을 건드리지 않고 따로 열고 닫는다.
+        if action == Action::TextHistory {
+            if self.text_window.take().is_none()
+                && let Err(e) = self.open_text_history(event_loop)
+            {
+                show_error(&format!("{e:#}"));
+            }
+            return;
+        }
+        self.text_window = None;
         // 히스토리 창이 열려 있으면 닫는다. 히스토리 단축키를 다시 누른 경우는 닫기만 한다.
         if self.history.take().is_some() && action == Action::History {
             return;
@@ -295,6 +337,7 @@ impl App {
                 self.show_flash(event_loop, shot.bounds.x, shot.bounds.y, &shot.image)
             }),
             Action::History => self.open_history(event_loop),
+            Action::TextHistory => Ok(()), // 위에서 처리했다.
             Action::OpenFolder => self.config.save_dir().and_then(|dir| {
                 std::fs::create_dir_all(&dir)?;
                 open_with("explorer.exe", &dir)
@@ -304,6 +347,7 @@ impl App {
             Action::Autostart => self.toggle_autostart(),
             Action::Quit => {
                 self.selecting = None;
+                self.pins.clear();
                 event_loop.exit();
                 Ok(())
             }
@@ -316,6 +360,7 @@ impl App {
     fn reload_config(&mut self) -> Result<()> {
         // 파일에 오류가 있으면 지금 설정을 그대로 둔다.
         self.config = Config::load()?;
+        self.texts.set_limit(self.config.text_history_size);
         self.apply_hotkeys();
         if let Some(tray) = &self.tray {
             let (menu, autostart_item) = build_menu(&self.config)?;
@@ -362,6 +407,41 @@ impl App {
             )));
         }
         self.thumbs.insert(path, image);
+        Ok(())
+    }
+
+    fn open_text_history(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        if self.texts.items().is_empty() {
+            show_message("아직 복사한 텍스트가 없습니다.", false);
+            return Ok(());
+        }
+        // 창을 띄우면 포커스가 옮겨 오므로, 붙여 넣을 창을 먼저 기억해 둔다.
+        self.paste_target = text_history::foreground_window();
+        let monitor = cursor_monitor(event_loop).context("모니터를 찾지 못했습니다")?;
+        let cursor = overlay::cursor_position().unwrap_or((monitor.position().x, monitor.position().y));
+        let font = match &self.font {
+            Some(font) => font.clone(),
+            None => self.font.insert(Rc::new(Font::load()?)).clone(),
+        };
+        self.text_window = Some(TextHistoryWindow::open(
+            event_loop,
+            self.texts.items(),
+            cursor,
+            (monitor.position(), monitor.size()),
+            monitor.scale_factor(),
+            font,
+        )?);
+        Ok(())
+    }
+
+    /// 고른 텍스트를 클립보드에 올리고, 원래 쓰던 창에 붙여 넣는다.
+    fn paste_text(&mut self, index: usize) -> Result<()> {
+        let Some(text) = self.texts.items().get(index).cloned() else {
+            return Ok(());
+        };
+        output::copy_text(&text)?;
+        self.texts.push(text);
+        text_history::paste_into(self.paste_target);
         Ok(())
     }
 
@@ -439,6 +519,11 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
+            AppEvent::ClipboardChanged => {
+                if let Some(text) = text_history::read_clipboard_text() {
+                    self.texts.push(text);
+                }
+            }
             AppEvent::Run(action) => self.run_action(event_loop, action),
             AppEvent::RunFromMenu(action) => {
                 if action.captures_screen() {
@@ -462,6 +547,36 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some(index) = self.pins.iter().position(|pin| pin.window_id() == id) {
+            match self.pins[index].handle(event) {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.pins.remove(index);
+                }
+                Err(e) => {
+                    self.pins.remove(index);
+                    show_error(&format!("{e:#}"));
+                }
+            }
+            return;
+        }
+        if let Some(window) = self.text_window.as_mut().filter(|w| w.window_id() == id) {
+            let outcome = match window.handle(event) {
+                Ok(None) => return,
+                Ok(Some(outcome)) => Ok(outcome),
+                Err(e) => Err(e),
+            };
+            // 창을 먼저 닫아 포커스가 돌아갈 수 있게 한 뒤 붙여 넣는다.
+            self.text_window = None;
+            let result = outcome.and_then(|outcome| match outcome {
+                TextOutcome::Closed => Ok(()),
+                TextOutcome::Picked(index) => self.paste_text(index),
+            });
+            if let Err(e) = result {
+                show_error(&format!("{e:#}"));
+            }
+            return;
+        }
         if let Some(flash) = self.flash.as_mut().filter(|f| f.window_id() == id) {
             if event == WindowEvent::RedrawRequested {
                 let _ = flash.draw();
@@ -480,6 +595,12 @@ impl ApplicationHandler<AppEvent> for App {
             let result = outcome.and_then(|outcome| match outcome {
                 HistoryOutcome::Closed => Ok(()),
                 HistoryOutcome::Ocr { path } => copy_text_from(&path),
+                HistoryOutcome::Pin { image } => {
+                    let monitor = cursor_monitor(event_loop).context("모니터를 찾지 못했습니다")?;
+                    let pin = PinWindow::open(event_loop, image, (monitor.position(), monitor.size()))?;
+                    self.pins.push(pin);
+                    Ok(())
+                }
                 HistoryOutcome::Picked { path, as_path, edited } => self.copy_from_history(&path, as_path, edited),
             });
             if let Err(e) = result {
@@ -540,6 +661,7 @@ fn build_menu(config: &Config) -> Result<(Menu, CheckMenuItem)> {
         &item(Action::Full),
         &PredefinedMenuItem::separator(),
         &item(Action::History),
+        &item(Action::TextHistory),
         &item(Action::OpenFolder),
         &PredefinedMenuItem::separator(),
         &item(Action::OpenConfig),
@@ -622,7 +744,7 @@ fn open_with(program: &str, target: &Path) -> Result<()> {
 fn already_running() -> bool {
     use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;
-    let name: Vec<u16> = "Local\\capture_tool_tray_single_instance"
+    let name: Vec<u16> = "Local\\chalkak_tray_single_instance"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -684,13 +806,13 @@ mod tests {
     #[test]
     fn default_hotkeys_parse_and_are_distinct() {
         let config = Config::default();
-        let mut ids: Vec<u32> = [Action::Region, Action::RegionEdit, Action::Again, Action::History]
+        let mut ids: Vec<u32> = [Action::Region, Action::RegionEdit, Action::Again, Action::History, Action::TextHistory]
             .into_iter()
             .map(|a| a.hotkey_text(&config).unwrap().parse::<HotKey>().unwrap().id())
             .collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 4);
+        assert_eq!(ids.len(), 5);
     }
 
     #[test]

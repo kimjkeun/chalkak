@@ -1,4 +1,4 @@
-//! 설정 파일 (`%APPDATA%\capture_tool\config\config.toml`).
+//! 설정 파일 (`%APPDATA%\chalkak\config\config.toml`).
 //! 처음 실행하면 설명이 달린 기본 파일을 만들어 둔다.
 
 use std::fs;
@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::history;
 use crate::output::{self, CopyMode};
 
-const DEFAULT_FILE: &str = r#"# capture_tool 설정
+const DEFAULT_FILE: &str = r#"# 찰칵 설정
 # 고친 뒤 트레이 메뉴의 "설정 다시 불러오기"를 누르면 바로 적용됩니다.
 
 # 캡쳐를 저장할 폴더. 비워 두면 사진\Captures 폴더에 저장합니다.
@@ -31,6 +31,9 @@ history_size = 20
 #   "top"   : 위쪽에 가로로 (큰 미리보기는 아래)
 history_layout = "right"
 
+# 기억해 둘 복사한 텍스트 개수 (1~100). 프로그램을 끄면 사라집니다.
+text_history_size = 30
+
 # 전역 단축키. Ctrl, Alt, Shift, Win 과 글자·숫자·F1~F12 를 + 로 잇습니다.
 # 비워 두면 그 단축키는 쓰지 않습니다.
 [hotkeys]
@@ -38,6 +41,7 @@ region = "Ctrl+Alt+A"        # 영역 캡쳐
 again = "Ctrl+Alt+S"         # 같은 영역 다시 캡쳐
 history = "Ctrl+Alt+D"       # 캡쳐 히스토리 (편집기)
 region_edit = "Ctrl+Alt+E"   # 영역 캡쳐 후 바로 편집기 열기
+text_history = "Ctrl+Alt+Q"  # 복사한 텍스트 히스토리
 "#;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -47,6 +51,7 @@ pub struct Config {
     pub copy: CopyMode,
     pub history_size: usize,
     pub history_layout: HistoryLayout,
+    pub text_history_size: usize,
     pub hotkeys: Hotkeys,
 }
 
@@ -65,6 +70,7 @@ pub struct Hotkeys {
     pub again: String,
     pub history: String,
     pub region_edit: String,
+    pub text_history: String,
 }
 
 impl Default for Config {
@@ -74,6 +80,7 @@ impl Default for Config {
             copy: CopyMode::Image,
             history_size: 20,
             history_layout: HistoryLayout::Right,
+            text_history_size: 30,
             hotkeys: Hotkeys::default(),
         }
     }
@@ -86,6 +93,7 @@ impl Default for Hotkeys {
             again: "Ctrl+Alt+S".into(),
             history: "Ctrl+Alt+D".into(),
             region_edit: "Ctrl+Alt+E".into(),
+            text_history: "Ctrl+Alt+Q".into(),
         }
     }
 }
@@ -111,6 +119,9 @@ impl Config {
         if !(1..=history::MAX_ENTRIES).contains(&config.history_size) {
             bail!("history_size 는 1~{} 사이여야 합니다", history::MAX_ENTRIES);
         }
+        if !(1..=100).contains(&config.text_history_size) {
+            bail!("text_history_size 는 1~100 사이여야 합니다");
+        }
         Ok(config)
     }
 
@@ -125,7 +136,7 @@ impl Config {
 
 /// 설정 파일의 위치.
 pub fn path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "capture_tool")
+    let dirs = directories::ProjectDirs::from("", "", "chalkak")
         .context("설정 폴더를 찾지 못했습니다")?;
     Ok(dirs.config_dir().join("config.toml"))
 }
@@ -162,6 +173,7 @@ mod tests {
         assert!(Config::parse("copy = \"jpg\"").is_err());
         assert!(Config::parse("history_size = 0").is_err());
         assert!(Config::parse("history_size = 101").is_err());
+        assert!(Config::parse("text_history_size = 0").is_err());
         assert!(Config::parse("history_layout = \"left\"").is_err());
         assert_eq!(
             Config::parse("history_layout = \"top\"").unwrap().history_layout,

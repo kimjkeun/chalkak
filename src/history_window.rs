@@ -24,7 +24,7 @@ use crate::config::HistoryLayout;
 use crate::history::fit;
 
 const TITLE: &str =
-    "캡쳐 히스토리   |   목록 클릭: 선택   ·   더블클릭·숫자 키: 바로 복사   ·   방향키: 이동   ·   Del: 삭제   ·   Esc: 닫기";
+    "찰칵 · 캡쳐 히스토리   |   목록 클릭: 선택   ·   더블클릭·숫자 키: 바로 복사   ·   방향키: 이동   ·   Del·×: 삭제   ·   P: 화면에 띄우기   ·   Esc: 닫기";
 
 const BACKGROUND: u32 = 0x001E_1E1E;
 const TOOLBAR_COLOR: u32 = 0x0026_2626;
@@ -34,6 +34,7 @@ const PANE_COLOR: u32 = 0x0012_1212;
 const BUTTON_COLOR: u32 = 0x003A_3A3A;
 const ACCENT: u32 = 0x0025_63EB;
 const WHITE: u32 = 0x00FF_FFFF;
+const CLOSE_COLOR: u32 = 0x0055_5555;
 const LABEL: Color = [0xF0, 0xF0, 0xF0];
 
 /// 주석에 쓸 수 있는 색. 첫 번째가 기본값이다.
@@ -68,6 +69,8 @@ pub enum HistoryOutcome {
     Picked { path: PathBuf, as_path: bool, edited: Option<RgbaImage> },
     /// `path`의 캡쳐에서 글자를 읽어 클립보드로 보낸다.
     Ocr { path: PathBuf },
+    /// 이 그림을 화면 위에 띄워 둔다.
+    Pin { image: RgbaImage },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +90,7 @@ enum Button {
     Color(usize),
     Undo,
     Delete,
+    Pin,
     Ocr,
     CopyImage,
     CopyPath,
@@ -474,6 +478,13 @@ impl HistoryWindow {
             return hit.and_then(|b| self.press(b.button));
         }
         if let Some(index) = self.layout.cell_at(x, y, self.scroll) {
+            // 칸 오른쪽 위의 × 를 누르면 그 캡쳐를 지운다.
+            let (cx, cy) = self.layout.cell_origin(index, self.scroll);
+            let size = self.layout.badge;
+            if x >= cx + self.layout.cell_w - size && y < cy + size {
+                self.last_click = None;
+                return self.delete_index(index);
+            }
             let now = Instant::now();
             let double = self
                 .last_click
@@ -520,6 +531,7 @@ impl HistoryWindow {
             Button::Color(index) => self.color = index,
             Button::Undo => self.undo(),
             Button::Delete => return self.delete_selected(),
+            Button::Pin => return self.pin_selected(),
             Button::Ocr => return Some(self.ocr_selected()),
             Button::CopyImage => return Some(self.pick(self.selected, false)),
             Button::CopyPath => return Some(self.pick(self.selected, true)),
@@ -544,6 +556,7 @@ impl HistoryWindow {
             KeyCode::KeyN if !self.ctrl => self.toggle_tool(Tool::Marker),
             KeyCode::KeyO if !self.ctrl => return Some(self.ocr_selected()),
             KeyCode::Delete => return self.delete_selected(),
+            KeyCode::KeyP if !self.ctrl => return self.pin_selected(),
             KeyCode::ArrowUp | KeyCode::ArrowLeft => self.select(self.selected.saturating_sub(1)),
             KeyCode::ArrowDown | KeyCode::ArrowRight => {
                 self.select((self.selected + 1).min(self.entries.len() - 1));
@@ -688,6 +701,37 @@ impl HistoryWindow {
                 .map(|image| annotate::apply(&image.to_rgba8(), stored, &self.font))
         };
         HistoryOutcome::Picked { path, as_path, edited }
+    }
+
+    /// 보고 있는 캡쳐를 (그려 둔 것과 함께) 화면 위에 띄운다.
+    fn pin_selected(&mut self) -> Option<HistoryOutcome> {
+        self.finish_text();
+        let image = self.current.as_ref()?;
+        let image = if self.annotations.is_empty() {
+            image.clone()
+        } else {
+            annotate::apply(image, &self.annotations, &self.font)
+        };
+        Some(HistoryOutcome::Pin { image })
+    }
+
+    /// 목록의 `index`번째 캡쳐를 휴지통으로 보낸다.
+    fn delete_index(&mut self, index: usize) -> Option<HistoryOutcome> {
+        if index == self.selected {
+            return self.delete_selected();
+        }
+        let path = self.entries.get(index)?.path.clone();
+        if let Err(e) = crate::output::move_to_recycle_bin(&path) {
+            self.window.set_title(&format!("삭제하지 못했습니다: {e:#}"));
+            return None;
+        }
+        self.entries.remove(index);
+        if index < self.selected {
+            self.selected -= 1;
+        }
+        let size = self.window.inner_size();
+        self.relayout((size.width, size.height));
+        None
     }
 
     fn ocr_selected(&self) -> HistoryOutcome {
@@ -835,7 +879,7 @@ impl HistoryWindow {
         let left_end = x + width;
 
         let mut right = self.layout.width - gap;
-        for button in [Button::CopyPath, Button::CopyImage, Button::Ocr, Button::Delete] {
+        for button in [Button::CopyPath, Button::CopyImage, Button::Ocr, Button::Pin, Button::Delete] {
             let width = text_width(button) + 2 * padding;
             right -= width;
             boxes.push(ButtonBox { button, x: right, width });
@@ -907,11 +951,20 @@ impl HistoryWindow {
                 cy + (layout.cell_h - entry.cell.height) / 2,
                 &entry.cell,
             );
-            // 그려 둔 것이 있는 캡쳐는 오른쪽 위에 표시한다.
+            // 그려 둔 것이 있는 캡쳐는 오른쪽 아래에 표시한다.
             let drawn = if selected { !self.annotations.is_empty() } else { !entry.annotations.is_empty() };
             if drawn {
                 let mark = layout.badge / 2;
-                frame.fill(cx + layout.cell_w - mark, cy, mark, mark, 0x00E5_3935);
+                frame.fill(cx + layout.cell_w - mark, cy + layout.cell_h - mark, mark, mark, 0x00E5_3935);
+            }
+            // 오른쪽 위의 지우기(×) 단추.
+            let size = layout.badge;
+            let (bx, by) = (cx + layout.cell_w - size, cy);
+            frame.fill(bx, by, size, size, CLOSE_COLOR);
+            let (margin, thick) = (size * 3 / 10, (size / 12).max(2));
+            for i in margin..size - margin {
+                frame.fill(bx + i, by + i, thick, thick, WHITE);
+                frame.fill(bx + size - thick - i, by + i, thick, thick, WHITE);
             }
             if let Some(glyph) = DIGITS.get(i) {
                 frame.fill(cx, cy, layout.badge, layout.badge, ACCENT);
@@ -989,6 +1042,7 @@ fn button_label(button: Button, short: bool) -> &'static str {
         Button::Color(_) => ("", ""),
         Button::Undo => ("되돌리기 (Ctrl+Z)", "되돌리기"),
         Button::Delete => ("삭제 (Del)", "삭제"),
+        Button::Pin => ("띄우기 (P)", "띄우기"),
         Button::Ocr => ("글자 추출 (O)", "글자 추출"),
         Button::CopyImage => ("이미지 복사 (Enter)", "이미지 복사"),
         Button::CopyPath => ("경로 복사 (Shift+Enter)", "경로 복사"),

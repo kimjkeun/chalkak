@@ -1,4 +1,4 @@
-//! 명령줄 도구(`capture_tool`)와 트레이 상주 프로그램(`capture_tool_tray`)이 함께 쓰는 코드.
+//! 명령줄 도구(`chalkak`)와 트레이 상주 프로그램(`chalkak_tray`)이 함께 쓰는 코드.
 
 pub mod annotate;
 pub mod autostart;
@@ -10,7 +10,10 @@ pub mod history_window;
 pub mod ocr;
 pub mod output;
 pub mod overlay;
+pub mod pin;
 pub mod state;
+pub mod text_history;
+pub mod text_history_window;
 
 use anyhow::Result;
 use image::RgbaImage;
