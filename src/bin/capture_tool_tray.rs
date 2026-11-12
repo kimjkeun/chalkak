@@ -474,19 +474,13 @@ impl ApplicationHandler<AppEvent> for App {
                 Ok(Some(outcome)) => Ok(outcome),
                 Err(e) => Err(e),
             };
-            let Some((_, files)) = self.history.take() else {
+            if self.history.take().is_none() {
                 return;
-            };
+            }
             let result = outcome.and_then(|outcome| match outcome {
                 HistoryOutcome::Closed => Ok(()),
-                HistoryOutcome::Ocr { index } => match files.get(index) {
-                    Some(path) => copy_text_from(path),
-                    None => Ok(()),
-                },
-                HistoryOutcome::Picked { index, as_path, edited } => match files.get(index) {
-                    Some(path) => self.copy_from_history(path, as_path, edited),
-                    None => Ok(()),
-                },
+                HistoryOutcome::Ocr { path } => copy_text_from(&path),
+                HistoryOutcome::Picked { path, as_path, edited } => self.copy_from_history(&path, as_path, edited),
             });
             if let Err(e) = result {
                 show_error(&format!("{e:#}"));

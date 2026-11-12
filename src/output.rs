@@ -72,6 +72,35 @@ impl CopyMode {
     }
 }
 
+/// 파일을 휴지통으로 보낸다 (탐색기에서 되살릴 수 있다).
+pub fn move_to_recycle_bin(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW,
+        SHFileOperationW,
+    };
+    let absolute = std::path::absolute(path)
+        .with_context(|| format!("경로를 알 수 없습니다: {}", path.display()))?;
+    // 경로 목록 형식이라 0을 두 번 붙여 끝낸다.
+    let from: Vec<u16> = absolute.as_os_str().encode_wide().chain([0, 0]).collect();
+    let mut operation = SHFILEOPSTRUCTW {
+        hwnd: std::ptr::null_mut(),
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        pTo: std::ptr::null(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16,
+        fAnyOperationsAborted: 0,
+        hNameMappings: std::ptr::null_mut(),
+        lpszProgressTitle: std::ptr::null(),
+    };
+    // SAFETY: 구조체와 그 안의 경로 버퍼는 호출이 끝날 때까지 살아 있다.
+    let code = unsafe { SHFileOperationW(&mut operation) };
+    if code != 0 || operation.fAnyOperationsAborted != 0 || absolute.exists() {
+        anyhow::bail!("휴지통으로 보내지 못했습니다: {}", absolute.display());
+    }
+    Ok(())
+}
+
 /// 글자를 클립보드에 올린다.
 pub fn copy_text(text: &str) -> Result<()> {
     arboard::Clipboard::new()

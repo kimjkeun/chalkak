@@ -26,6 +26,7 @@ const USAGE: &str = "\
   capture_tool autostart <on|off|status>
                                  Windows 시작 시 트레이 프로그램 자동 실행
   capture_tool config            설정 파일 위치 출력
+  capture_tool install           고정 위치에 설치하고 그곳의 트레이 프로그램을 실행
 
 옵션:
   --out <파일>              저장할 파일 (png, jpg). 생략하면 설정의 저장 폴더에
@@ -86,6 +87,7 @@ fn main() -> Result<()> {
             println!("{}", ocr::recognize(&image)?);
             Ok(())
         }
+        "install" => install(),
         "autostart" => autostart_command(args.get(1).map(String::as_str)),
         "config" => {
             Config::load()?; // 없으면 기본 파일을 만든다.
@@ -134,6 +136,66 @@ fn finish(image: &RgbaImage, opts: &Options) -> Result<()> {
     };
     output::copy(opts.copy.unwrap_or(config.copy), image, &path)?;
     println!("{}", path.display());
+    Ok(())
+}
+
+/// 두 프로그램을 `%LOCALAPPDATA%\capture_tool\bin`에 복사하고 그곳의 트레이 프로그램을 실행한다.
+/// 빌드 폴더를 지우거나 다시 빌드해도 쓰던 프로그램이 영향을 받지 않게 된다.
+fn install() -> Result<()> {
+    const FILES: [&str; 2] = ["capture_tool.exe", "capture_tool_tray.exe"];
+    let source = std::env::current_exe()
+        .context("실행 파일 위치를 알 수 없습니다")?
+        .parent()
+        .context("실행 파일의 폴더를 알 수 없습니다")?
+        .to_path_buf();
+    let target = directories::BaseDirs::new()
+        .context("사용자 폴더를 찾지 못했습니다")?
+        .data_local_dir()
+        .join("capture_tool")
+        .join("bin");
+    std::fs::create_dir_all(&target)
+        .with_context(|| format!("폴더를 만들지 못했습니다: {}", target.display()))?;
+    if std::fs::canonicalize(&source)? == std::fs::canonicalize(&target)? {
+        bail!("이미 설치된 위치에서 실행 중입니다. 새로 빌드한 폴더의 capture_tool 로 실행하세요.");
+    }
+    for name in FILES {
+        if !source.join(name).exists() {
+            bail!("{name} 이 {} 에 없습니다. 먼저 cargo build --release 를 실행하세요.", source.display());
+        }
+    }
+    let had_autostart = autostart::registered()?.is_some();
+
+    // 실행 중인 트레이 프로그램은 파일을 잡고 있으므로 먼저 끝낸다.
+    let _ = std::process::Command::new("taskkill")
+        .args(["/IM", "capture_tool_tray.exe", "/F"])
+        .output();
+    for name in FILES {
+        let mut tries = 0;
+        loop {
+            match std::fs::copy(source.join(name), target.join(name)) {
+                Ok(_) => break,
+                Err(_) if tries < 10 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                Err(e) => return Err(e).with_context(|| format!("{name} 을 복사하지 못했습니다")),
+            }
+        }
+    }
+    let tray = target.join("capture_tool_tray.exe");
+    if had_autostart {
+        autostart::enable(&tray)?;
+    }
+    // 이 명령의 출력 통로를 물려주지 않아야, 호출한 쪽이 트레이 프로그램이 끝나길 기다리지 않는다.
+    std::process::Command::new(&tray)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("설치한 트레이 프로그램을 실행하지 못했습니다")?;
+    println!("설치 위치: {}", target.display());
+    println!("자동 실행: {}", if had_autostart { "설치 위치로 갱신함" } else { "꺼져 있음 (그대로 둠)" });
+    println!("트레이 프로그램을 설치 위치에서 실행했습니다.");
     Ok(())
 }
 

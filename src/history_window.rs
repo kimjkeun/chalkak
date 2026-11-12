@@ -24,7 +24,7 @@ use crate::config::HistoryLayout;
 use crate::history::fit;
 
 const TITLE: &str =
-    "캡쳐 히스토리   |   목록 클릭: 선택   ·   더블클릭·숫자 키: 바로 복사   ·   방향키: 이동   ·   Esc: 닫기";
+    "캡쳐 히스토리   |   목록 클릭: 선택   ·   더블클릭·숫자 키: 바로 복사   ·   방향키: 이동   ·   Del: 삭제   ·   Esc: 닫기";
 
 const BACKGROUND: u32 = 0x001E_1E1E;
 const TOOLBAR_COLOR: u32 = 0x0026_2626;
@@ -63,11 +63,11 @@ const DIGITS: [[u8; 7]; 9] = [
 
 pub enum HistoryOutcome {
     Closed,
-    /// `index`번째(0부터) 캡쳐를 클립보드로 보낸다. `as_path`면 이미지 대신 파일 경로를,
+    /// `path`의 캡쳐를 클립보드로 보낸다. `as_path`면 이미지 대신 파일 경로를,
     /// `edited`가 있으면 주석을 그린 그 이미지를 새 캡쳐로 저장해서 보낸다.
-    Picked { index: usize, as_path: bool, edited: Option<RgbaImage> },
-    /// `index`번째 캡쳐의 글자를 읽어 클립보드로 보낸다.
-    Ocr { index: usize },
+    Picked { path: PathBuf, as_path: bool, edited: Option<RgbaImage> },
+    /// `path`의 캡쳐에서 글자를 읽어 클립보드로 보낸다.
+    Ocr { path: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +86,7 @@ enum Button {
     Tool(Tool),
     Color(usize),
     Undo,
+    Delete,
     Ocr,
     CopyImage,
     CopyPath,
@@ -272,6 +273,8 @@ struct Entry {
     /// 목록 칸 크기로 줄이기 전의 썸네일.
     source: RgbaImage,
     cell: Thumb,
+    /// 이 캡쳐에 그려 둔 주석. 선택되어 있는 동안에는 창의 `annotations`에 있다.
+    annotations: Vec<Annotation>,
 }
 
 /// 입력 중인 글자. 좌표는 원본 이미지 기준이고 `(x, y)`가 줄의 왼쪽 위다.
@@ -359,6 +362,7 @@ impl HistoryWindow {
                     path: path.to_path_buf(),
                     source: (*thumb).clone(),
                     cell: Thumb { width: 0, height: 0, pixels: Vec::new() },
+                    annotations: Vec::new(),
                 })
                 .collect(),
             selected: 0,
@@ -515,7 +519,8 @@ impl HistoryWindow {
             Button::Tool(tool) => self.toggle_tool(tool),
             Button::Color(index) => self.color = index,
             Button::Undo => self.undo(),
-            Button::Ocr => return Some(HistoryOutcome::Ocr { index: self.selected }),
+            Button::Delete => return self.delete_selected(),
+            Button::Ocr => return Some(self.ocr_selected()),
             Button::CopyImage => return Some(self.pick(self.selected, false)),
             Button::CopyPath => return Some(self.pick(self.selected, true)),
         }
@@ -537,7 +542,8 @@ impl HistoryWindow {
             KeyCode::KeyT if !self.ctrl => self.toggle_tool(Tool::Text),
             KeyCode::KeyA if !self.ctrl => self.toggle_tool(Tool::Arrow),
             KeyCode::KeyN if !self.ctrl => self.toggle_tool(Tool::Marker),
-            KeyCode::KeyO if !self.ctrl => return Some(HistoryOutcome::Ocr { index: self.selected }),
+            KeyCode::KeyO if !self.ctrl => return Some(self.ocr_selected()),
+            KeyCode::Delete => return self.delete_selected(),
             KeyCode::ArrowUp | KeyCode::ArrowLeft => self.select(self.selected.saturating_sub(1)),
             KeyCode::ArrowDown | KeyCode::ArrowRight => {
                 self.select((self.selected + 1).min(self.entries.len() - 1));
@@ -650,14 +656,15 @@ impl HistoryWindow {
         }
     }
 
-    /// 다른 캡쳐를 고른다. 그리던 주석은 그 캡쳐의 것이므로 버린다.
+    /// 다른 캡쳐를 고른다. 그리던 주석은 원래 캡쳐에 맡겨 두고, 고른 캡쳐의 것을 꺼내 온다.
     fn select(&mut self, index: usize) {
         if index == self.selected || index >= self.entries.len() {
             return;
         }
-        self.cancel_text();
+        self.finish_text();
         self.drag = None;
-        self.annotations.clear();
+        self.entries[self.selected].annotations = std::mem::take(&mut self.annotations);
+        self.annotations = std::mem::take(&mut self.entries[index].annotations);
         self.selected = index;
         self.load_current();
         self.rebuild_preview();
@@ -666,11 +673,48 @@ impl HistoryWindow {
 
     fn pick(&mut self, index: usize, as_path: bool) -> HistoryOutcome {
         self.finish_text();
-        let edited = (index == self.selected && !self.annotations.is_empty())
-            .then(|| self.current.as_ref())
-            .flatten()
-            .map(|image| annotate::apply(image, &self.annotations, &self.font));
-        HistoryOutcome::Picked { index, as_path, edited }
+        let path = self.entries[index].path.clone();
+        let edited = if index == self.selected {
+            self.current
+                .as_ref()
+                .filter(|_| !self.annotations.is_empty())
+                .map(|image| annotate::apply(image, &self.annotations, &self.font))
+        } else {
+            // 선택되어 있지 않은 캡쳐도 그려 둔 것이 있으면 함께 내보낸다.
+            let stored = &self.entries[index].annotations;
+            image::open(&path)
+                .ok()
+                .filter(|_| !stored.is_empty())
+                .map(|image| annotate::apply(&image.to_rgba8(), stored, &self.font))
+        };
+        HistoryOutcome::Picked { path, as_path, edited }
+    }
+
+    fn ocr_selected(&self) -> HistoryOutcome {
+        HistoryOutcome::Ocr { path: self.entries[self.selected].path.clone() }
+    }
+
+    /// 보고 있는 캡쳐를 휴지통으로 보내고 목록에서 뺀다. 마지막 하나였으면 창을 닫는다.
+    fn delete_selected(&mut self) -> Option<HistoryOutcome> {
+        self.cancel_text();
+        self.drag = None;
+        let path = self.entries[self.selected].path.clone();
+        if let Err(e) = crate::output::move_to_recycle_bin(&path) {
+            self.window.set_title(&format!("삭제하지 못했습니다: {e:#}"));
+            return None;
+        }
+        self.entries.remove(self.selected);
+        self.annotations.clear();
+        if self.entries.is_empty() {
+            return Some(HistoryOutcome::Closed);
+        }
+        self.selected = self.selected.min(self.entries.len() - 1);
+        self.annotations = std::mem::take(&mut self.entries[self.selected].annotations);
+        self.load_current();
+        let size = self.window.inner_size();
+        self.relayout((size.width, size.height));
+        self.scroll = self.layout.scroll_to_show(self.selected, self.scroll);
+        None
     }
 
     // ---- 배치와 좌표 ----
@@ -791,7 +835,7 @@ impl HistoryWindow {
         let left_end = x + width;
 
         let mut right = self.layout.width - gap;
-        for button in [Button::CopyPath, Button::CopyImage, Button::Ocr] {
+        for button in [Button::CopyPath, Button::CopyImage, Button::Ocr, Button::Delete] {
             let width = text_width(button) + 2 * padding;
             right -= width;
             boxes.push(ButtonBox { button, x: right, width });
@@ -863,6 +907,12 @@ impl HistoryWindow {
                 cy + (layout.cell_h - entry.cell.height) / 2,
                 &entry.cell,
             );
+            // 그려 둔 것이 있는 캡쳐는 오른쪽 위에 표시한다.
+            let drawn = if selected { !self.annotations.is_empty() } else { !entry.annotations.is_empty() };
+            if drawn {
+                let mark = layout.badge / 2;
+                frame.fill(cx + layout.cell_w - mark, cy, mark, mark, 0x00E5_3935);
+            }
             if let Some(glyph) = DIGITS.get(i) {
                 frame.fill(cx, cy, layout.badge, layout.badge, ACCENT);
                 let dot = (layout.badge / 10).max(1);
@@ -938,6 +988,7 @@ fn button_label(button: Button, short: bool) -> &'static str {
         Button::Tool(Tool::Text) => ("텍스트 (T)", "텍스트"),
         Button::Color(_) => ("", ""),
         Button::Undo => ("되돌리기 (Ctrl+Z)", "되돌리기"),
+        Button::Delete => ("삭제 (Del)", "삭제"),
         Button::Ocr => ("글자 추출 (O)", "글자 추출"),
         Button::CopyImage => ("이미지 복사 (Enter)", "이미지 복사"),
         Button::CopyPath => ("경로 복사 (Shift+Enter)", "경로 복사"),
