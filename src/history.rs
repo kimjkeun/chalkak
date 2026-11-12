@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use image::RgbaImage;
 
-/// 히스토리 창에 보여 줄 최대 개수.
-pub const MAX_ENTRIES: usize = 12;
+/// 히스토리 창에 보여 줄 수 있는 최대 개수.
+pub const MAX_ENTRIES: usize = 100;
 
 /// 메모리에 들고 있는 썸네일의 최대 크기. 창에 그릴 때 한 번 더 줄인다.
 const THUMB_MAX: (u32, u32) = (480, 320);

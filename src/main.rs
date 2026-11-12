@@ -14,13 +14,14 @@ use capture_tool::capture::{self, Rect};
 use capture_tool::config::{self, Config};
 use capture_tool::output::{self, CopyMode};
 use capture_tool::overlay::{Canvas, Outcome, Overlay};
-use capture_tool::{capture_canvas, crop_from_canvas, state};
+use capture_tool::{capture_canvas, crop_from_canvas, ocr, state};
 
 const USAGE: &str = "\
 사용법:
   capture_tool region [옵션]     드래그로 영역을 선택해 캡쳐 (Esc/오른쪽 클릭: 취소)
   capture_tool again [옵션]      직전에 선택한 영역을 그대로 다시 캡쳐
   capture_tool full [옵션]       주 모니터 전체를 캡쳐
+  capture_tool ocr <이미지 파일>  이미지의 글자를 읽어 출력
   capture_tool monitors          연결된 모니터 목록 출력
   capture_tool autostart <on|off|status>
                                  Windows 시작 시 트레이 프로그램 자동 실행
@@ -73,6 +74,16 @@ fn main() -> Result<()> {
                 let b = shot.bounds;
                 println!("{}: {}x{} @ ({}, {})", i + 1, b.width, b.height, b.x, b.y);
             }
+            Ok(())
+        }
+        "ocr" => {
+            let path = args.get(1).with_context(|| format!("이미지 파일을 지정하세요
+
+{USAGE}"))?;
+            let image = image::open(path)
+                .with_context(|| format!("이미지를 열지 못했습니다: {path}"))?
+                .to_rgba8();
+            println!("{}", ocr::recognize(&image)?);
             Ok(())
         }
         "autostart" => autostart_command(args.get(1).map(String::as_str)),

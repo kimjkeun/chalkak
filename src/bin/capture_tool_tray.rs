@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,13 +18,14 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::monitor::MonitorHandle;
 use winit::window::WindowId;
 
+use capture_tool::annotate::Font;
 use capture_tool::config::{self, Config};
 use capture_tool::flash::Flash;
 use capture_tool::history::{self, ThumbCache};
 use capture_tool::history_window::{HistoryOutcome, HistoryWindow};
 use capture_tool::output::{self, CopyMode};
 use capture_tool::overlay::{Canvas, Outcome, Overlay};
-use capture_tool::{autostart, capture, capture_canvas, crop_from_canvas, state};
+use capture_tool::{autostart, capture, capture_canvas, crop_from_canvas, ocr, state};
 
 const APP_NAME: &str = "capture_tool";
 
@@ -33,6 +35,7 @@ const MENU_CLOSE_DELAY: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Region,
+    RegionEdit,
     Again,
     Full,
     History,
@@ -44,8 +47,9 @@ enum Action {
 }
 
 impl Action {
-    const ALL: [Action; 9] = [
+    const ALL: [Action; 10] = [
         Action::Region,
+        Action::RegionEdit,
         Action::Again,
         Action::Full,
         Action::History,
@@ -59,6 +63,7 @@ impl Action {
     fn id(self) -> &'static str {
         match self {
             Action::Region => "region",
+            Action::RegionEdit => "region_edit",
             Action::Again => "again",
             Action::Full => "full",
             Action::History => "history",
@@ -77,6 +82,7 @@ impl Action {
     fn text(self) -> &'static str {
         match self {
             Action::Region => "영역 캡쳐",
+            Action::RegionEdit => "영역 캡쳐 후 편집",
             Action::Again => "같은 영역 다시 캡쳐",
             Action::Full => "주 모니터 전체 캡쳐",
             Action::History => "캡쳐 히스토리",
@@ -92,6 +98,7 @@ impl Action {
     fn hotkey_text(self, config: &Config) -> Option<&str> {
         let text = match self {
             Action::Region => &config.hotkeys.region,
+            Action::RegionEdit => &config.hotkeys.region_edit,
             Action::Again => &config.hotkeys.again,
             Action::History => &config.hotkeys.history,
             _ => return None,
@@ -108,7 +115,7 @@ impl Action {
 
     /// 화면을 찍는 동작인지 (메뉴에서 골랐을 때 메뉴가 사라지길 기다려야 한다).
     fn captures_screen(self) -> bool {
-        matches!(self, Action::Region | Action::Again | Action::Full)
+        matches!(self, Action::Region | Action::RegionEdit | Action::Again | Action::Full)
     }
 }
 
@@ -187,9 +194,11 @@ fn run() -> Result<()> {
         tray: None,
         autostart_item: None,
         selecting: None,
+        edit_after_capture: false,
         flash: None,
         history: None,
         thumbs: ThumbCache::default(),
+        font: None,
     };
     app.apply_hotkeys();
     event_loop.run_app(&mut app).context("이벤트 루프 오류")
@@ -205,11 +214,15 @@ struct App {
     autostart_item: Option<CheckMenuItem>,
     /// 영역 선택 중일 때의 오버레이와 그 바탕 화면.
     selecting: Option<(Overlay, Canvas)>,
+    /// 지금 하는 영역 선택이 끝나면 편집기를 열지.
+    edit_after_capture: bool,
     /// 캡쳐 직후 잠깐 떠 있는 번쩍임.
     flash: Option<Flash>,
     /// 열려 있는 히스토리 창과, 거기 보이는 파일들(보이는 순서대로).
     history: Option<(HistoryWindow, Vec<PathBuf>)>,
     thumbs: ThumbCache,
+    /// 히스토리 창의 글자용 글꼴. 처음 열 때 읽는다.
+    font: Option<Rc<Font>>,
 }
 
 impl App {
@@ -265,7 +278,10 @@ impl App {
         // 이전 번쩍임이 새 캡쳐에 찍히지 않게 먼저 닫는다.
         self.flash = None;
         let result = match action {
-            Action::Region => self.start_region(event_loop),
+            Action::Region | Action::RegionEdit => {
+                self.edit_after_capture = action == Action::RegionEdit;
+                self.start_region(event_loop)
+            }
             Action::Again => state::load_last_region().and_then(|rect| {
                 let canvas = capture_canvas()?;
                 let image = crop_from_canvas(&canvas, rect)?;
@@ -361,23 +377,37 @@ impl App {
             show_message("아직 캡쳐한 것이 없습니다.", false);
             return Ok(());
         }
-        let thumbs: Vec<&RgbaImage> = files
+        let entries: Vec<(&Path, &RgbaImage)> = files
             .iter()
-            .filter_map(|path| self.thumbs.cached(path))
+            .filter_map(|path| Some((path.as_path(), self.thumbs.cached(path)?)))
             .collect();
         let monitor = cursor_monitor(event_loop).context("모니터를 찾지 못했습니다")?;
+        let font = match &self.font {
+            Some(font) => font.clone(),
+            None => self.font.insert(Rc::new(Font::load()?)).clone(),
+        };
         let window = HistoryWindow::open(
             event_loop,
-            &thumbs,
+            &entries,
             (monitor.position(), monitor.size()),
             monitor.scale_factor(),
+            self.config.history_layout,
+            font,
         )?;
         self.history = Some((window, files));
         Ok(())
     }
 
     /// 히스토리에서 고른 캡쳐를 다시 클립보드에 올린다.
-    fn copy_from_history(&mut self, path: &Path, as_path: bool) -> Result<()> {
+    /// 주석을 그린 것(`edited`)이면 새 캡쳐로 저장한 뒤 그것을 올린다.
+    fn copy_from_history(&mut self, path: &Path, as_path: bool, edited: Option<RgbaImage>) -> Result<()> {
+        if let Some(image) = edited {
+            let saved = output::save_to_dir(&image, &self.config.save_dir()?)?;
+            let mode = if as_path { CopyMode::Path } else { CopyMode::Image };
+            output::copy(mode, &image, &saved)?;
+            self.thumbs.insert(saved, &image);
+            return Ok(());
+        }
         if as_path {
             return output::copy_path(path);
         }
@@ -431,7 +461,7 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if let Some(flash) = self.flash.as_mut().filter(|f| f.window_id() == id) {
             if event == WindowEvent::RedrawRequested {
                 let _ = flash.draw();
@@ -449,8 +479,12 @@ impl ApplicationHandler<AppEvent> for App {
             };
             let result = outcome.and_then(|outcome| match outcome {
                 HistoryOutcome::Closed => Ok(()),
-                HistoryOutcome::Picked { index, as_path } => match files.get(index) {
-                    Some(path) => self.copy_from_history(path, as_path),
+                HistoryOutcome::Ocr { index } => match files.get(index) {
+                    Some(path) => copy_text_from(path),
+                    None => Ok(()),
+                },
+                HistoryOutcome::Picked { index, as_path, edited } => match files.get(index) {
+                    Some(path) => self.copy_from_history(path, as_path, edited),
                     None => Ok(()),
                 },
             });
@@ -477,7 +511,12 @@ impl ApplicationHandler<AppEvent> for App {
             Outcome::Selected(rect) => {
                 state::save_last_region(rect)?;
                 let image = crop_from_canvas(&canvas, rect)?;
-                self.finish(&image)
+                self.finish(&image)?;
+                if self.edit_after_capture {
+                    // 방금 찍은 것이 목록의 첫 번째로 선택된 채 편집기가 열린다.
+                    self.open_history(event_loop)?;
+                }
+                Ok(())
             }
         });
         if let Err(e) = result {
@@ -502,6 +541,7 @@ fn build_menu(config: &Config) -> Result<(Menu, CheckMenuItem)> {
     let menu = Menu::new();
     menu.append_items(&[
         &item(Action::Region),
+        &item(Action::RegionEdit),
         &item(Action::Again),
         &item(Action::Full),
         &PredefinedMenuItem::separator(),
@@ -560,6 +600,19 @@ fn tray_icon_image() -> Result<Icon> {
         }
     }
     Icon::from_rgba(rgba, SIZE, SIZE).context("트레이 아이콘 이미지를 만들지 못했습니다")
+}
+
+/// 캡쳐 파일의 글자를 읽어 클립보드에 올린다.
+fn copy_text_from(path: &Path) -> Result<()> {
+    let image = image::open(path)
+        .with_context(|| format!("이미지를 열지 못했습니다: {}", path.display()))?
+        .to_rgba8();
+    let text = ocr::recognize(&image)?;
+    if text.trim().is_empty() {
+        show_message("이 캡쳐에서 글자를 찾지 못했습니다.", false);
+        return Ok(());
+    }
+    output::copy_text(&text)
 }
 
 fn open_with(program: &str, target: &Path) -> Result<()> {
@@ -637,11 +690,13 @@ mod tests {
     #[test]
     fn default_hotkeys_parse_and_are_distinct() {
         let config = Config::default();
-        let ids: Vec<u32> = [Action::Region, Action::Again, Action::History]
+        let mut ids: Vec<u32> = [Action::Region, Action::RegionEdit, Action::Again, Action::History]
             .into_iter()
             .map(|a| a.hotkey_text(&config).unwrap().parse::<HotKey>().unwrap().id())
             .collect();
-        assert!(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2]);
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4);
     }
 
     #[test]

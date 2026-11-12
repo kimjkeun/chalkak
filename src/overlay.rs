@@ -21,6 +21,10 @@ use crate::capture::{Rect, Shot};
 /// 이보다 작은 드래그는 실수로 보고 무시한다.
 const MIN_SELECTION: u32 = 4;
 const BORDER_COLOR: u32 = 0x00FF_FFFF;
+/// 안내선: 가운데 선과, 그 양옆에 붙는 띠의 색과 두께.
+const GUIDE_COLOR: u32 = 0x00FF_FFFF;
+const GUIDE_EDGE_COLOR: u32 = 0x0000_0000;
+const GUIDE_HALF: i32 = 1;
 
 /// 모든 모니터의 캡쳐를 한 장으로 합친 것. `bounds`는 가상 데스크톱에서의 위치다.
 pub struct Canvas {
@@ -81,6 +85,43 @@ pub struct Overlay {
     dim: Vec<u32>,
     cursor: (i32, i32),
     drag_start: Option<(i32, i32)>,
+    /// 직전 프레임에서 `dim`과 다르게 칠한 영역. 다음 프레임에서 여기만 되돌린다.
+    painted: Vec<Area>,
+    /// 다음 다시 그리기가 우리 요청(커서 이동 등)으로 생긴 것인지.
+    partial_redraw: bool,
+    /// 창이 뜬 직후에는 요청이 합쳐질 수 있으므로, 처음 몇 번은 무조건 창 전체를 보낸다.
+    full_presents_left: u8,
+}
+
+/// 캔버스 안의 사각형 `[x0, x1) x [y0, y1)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Area {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+}
+
+impl Area {
+    fn is_empty(&self) -> bool {
+        self.x1 <= self.x0 || self.y1 <= self.y0
+    }
+}
+
+/// 커서를 지나는 안내선: 가운데 흰 선 1픽셀과 양옆의 검은 선. 어떤 배경에서도 보인다.
+/// 가로선과 세로선이 차지하는 영역을 돌려준다.
+fn guide_areas(cursor: (i32, i32), width: usize, height: usize) -> [Area; 2] {
+    let band = |c: i32, max: usize| {
+        let lo = (c - GUIDE_HALF).clamp(0, max as i32) as usize;
+        let hi = (c + GUIDE_HALF + 1).clamp(0, max as i32) as usize;
+        (lo, hi)
+    };
+    let (x0, x1) = band(cursor.0, width);
+    let (y0, y1) = band(cursor.1, height);
+    [
+        Area { x0, y0: 0, x1, y1: height },
+        Area { x0: 0, y0, x1: width, y1 },
+    ]
 }
 
 impl Overlay {
@@ -116,6 +157,14 @@ impl Overlay {
         // 채널마다 절반 밝기.
         let dim = bright.iter().map(|p| (p >> 1) & 0x007F_7F7F).collect();
 
+        let mut surface = surface;
+        surface
+            .resize(
+                NonZeroU32::new(width).context("캔버스 너비가 0입니다")?,
+                NonZeroU32::new(height).context("캔버스 높이가 0입니다")?,
+            )
+            .map_err(|e| anyhow!("그리기 표면 크기 조정 실패: {e}"))?;
+
         let mut overlay = Self {
             window,
             surface,
@@ -124,8 +173,12 @@ impl Overlay {
             height,
             bright,
             dim,
-            cursor: (0, 0),
+            // 창이 뜨자마자 안내선이 보이도록 현재 커서 위치에서 시작한다.
+            cursor: cursor_position().map_or((-10, -10), |(cx, cy)| (cx - x, cy - y)),
             drag_start: None,
+            painted: Vec::new(),
+            partial_redraw: false,
+            full_presents_left: 3,
         };
         // 첫 화면을 그린 뒤에 보여 줘서 빈 창이 깜빡이지 않게 한다.
         overlay.draw()?;
@@ -150,9 +203,7 @@ impl Overlay {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as i32, position.y as i32);
-                if self.drag_start.is_some() {
-                    self.window.request_redraw();
-                }
+                self.request_partial_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => match (button, state) {
                 (MouseButton::Right, ElementState::Pressed) => {
@@ -172,7 +223,7 @@ impl Overlay {
                                 ..sel
                             })));
                         }
-                        _ => self.window.request_redraw(),
+                        _ => self.request_partial_redraw(),
                     }
                 }
                 _ => {}
@@ -185,6 +236,11 @@ impl Overlay {
             _ => {}
         }
         Ok(None)
+    }
+
+    fn request_partial_redraw(&mut self) {
+        self.partial_redraw = true;
+        self.window.request_redraw();
     }
 
     /// 현재 드래그 중인 사각형 (캔버스 안쪽 좌표, 캔버스 범위로 잘림).
@@ -206,12 +262,6 @@ impl Overlay {
     fn draw(&mut self) -> Result<()> {
         let selection = self.selection();
         let (w, h) = (self.width as usize, self.height as usize);
-        self.surface
-            .resize(
-                NonZeroU32::new(self.width).context("캔버스 너비가 0입니다")?,
-                NonZeroU32::new(self.height).context("캔버스 높이가 0입니다")?,
-            )
-            .map_err(|e| anyhow!("그리기 표면 크기 조정 실패: {e}"))?;
         let mut buffer = self
             .surface
             .buffer_mut()
@@ -219,16 +269,43 @@ impl Overlay {
         if buffer.len() != w * h {
             bail!("그리기 버퍼 크기가 캔버스와 다릅니다");
         }
-        buffer.copy_from_slice(&self.dim);
+
+        // 화면 전체(모니터 여러 대 분량)를 매번 다시 그리면 느리므로,
+        // 직전에 칠한 곳만 되돌리고 바뀐 곳만 화면에 보낸다.
+        let mut damage: Vec<Area> = Vec::new();
+        // 창이 처음 보일 때나 Windows가 다시 그리라고 할 때는 창 전체를 화면에 보내야 한다.
+        // 우리가 요청한 다시 그리기(커서 이동 등)일 때만 바뀐 부분만 보낸다.
+        let present_all = !self.partial_redraw || self.full_presents_left > 0;
+        self.partial_redraw = false;
+        self.full_presents_left = self.full_presents_left.saturating_sub(1);
+        if present_all {
+            damage.push(Area { x0: 0, y0: 0, x1: w, y1: h });
+        }
+        if buffer.age() == 0 {
+            buffer.copy_from_slice(&self.dim);
+            self.painted.clear();
+            if !present_all {
+                damage.push(Area { x0: 0, y0: 0, x1: w, y1: h });
+            }
+        } else {
+            for area in self.painted.drain(..) {
+                for y in area.y0..area.y1 {
+                    let row = y * w;
+                    buffer[row + area.x0..row + area.x1]
+                        .copy_from_slice(&self.dim[row + area.x0..row + area.x1]);
+                }
+                damage.push(area);
+            }
+        }
 
         if let Some(sel) = selection.filter(|s| s.width > 0 && s.height > 0) {
+            // 드래그 중: 선택 영역을 원래 밝기로 보여 주고 테두리를 두른다.
             let (x0, y0) = (sel.x as usize, sel.y as usize);
             let (x1, y1) = (x0 + sel.width as usize, y0 + sel.height as usize);
             for y in y0..y1 {
                 let row = y * w;
                 buffer[row + x0..row + x1].copy_from_slice(&self.bright[row + x0..row + x1]);
             }
-            // 테두리 1픽셀.
             for x in x0..x1 {
                 buffer[y0 * w + x] = BORDER_COLOR;
                 buffer[(y1 - 1) * w + x] = BORDER_COLOR;
@@ -237,9 +314,74 @@ impl Overlay {
                 buffer[y * w + x0] = BORDER_COLOR;
                 buffer[y * w + x1 - 1] = BORDER_COLOR;
             }
+            self.painted.push(Area { x0, y0, x1, y1 });
+        } else if self.drag_start.is_none() {
+            // 드래그 전: 커서를 지나는 십자 안내선으로 위치를 알려 준다.
+            let (cx, cy) = self.cursor;
+            let [vertical, horizontal] = guide_areas(self.cursor, w, h);
+            for area in [vertical, horizontal] {
+                if area.is_empty() {
+                    continue;
+                }
+                for y in area.y0..area.y1 {
+                    buffer[y * w + area.x0..y * w + area.x1].fill(GUIDE_EDGE_COLOR);
+                }
+                self.painted.push(area);
+            }
+            // 가운데 흰 선은 검은 띠를 다 칠한 뒤에 그려야 교차점에서도 끊기지 않는다.
+            if cx >= 0 && (cx as usize) < w {
+                for y in 0..h {
+                    buffer[y * w + cx as usize] = GUIDE_COLOR;
+                }
+            }
+            if cy >= 0 && (cy as usize) < h {
+                buffer[cy as usize * w..(cy as usize + 1) * w].fill(GUIDE_COLOR);
+            }
         }
+        damage.extend(self.painted.iter().copied());
+
+        let rects: Vec<softbuffer::Rect> = damage
+            .iter()
+            .filter_map(|a| {
+                Some(softbuffer::Rect {
+                    x: a.x0 as u32,
+                    y: a.y0 as u32,
+                    width: NonZeroU32::new((a.x1.checked_sub(a.x0)?) as u32)?,
+                    height: NonZeroU32::new((a.y1.checked_sub(a.y0)?) as u32)?,
+                })
+            })
+            .collect();
         buffer
-            .present()
+            .present_with_damage(&rects)
             .map_err(|e| anyhow!("화면에 그리지 못했습니다: {e}"))
+    }
+}
+
+/// 가상 데스크톱에서의 현재 커서 위치 (물리 픽셀).
+fn cursor_position() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: 유효한 POINT를 가리키는 포인터를 넘긴다.
+    (unsafe { GetCursorPos(&mut point) } != 0).then_some((point.x, point.y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guide_lines_cover_cursor_and_stay_inside() {
+        let [v, h] = guide_areas((100, 50), 400, 300);
+        assert_eq!(v, Area { x0: 99, y0: 0, x1: 102, y1: 300 });
+        assert_eq!(h, Area { x0: 0, y0: 49, x1: 400, y1: 52 });
+
+        let [v, h] = guide_areas((0, 299), 400, 300);
+        assert_eq!((v.x0, v.x1), (0, 2));
+        assert_eq!((h.y0, h.y1), (298, 300));
+
+        // 커서가 캔버스 밖이면 그릴 것이 없다.
+        let [v, h] = guide_areas((-10, 1000), 400, 300);
+        assert!(v.is_empty() && h.is_empty());
     }
 }

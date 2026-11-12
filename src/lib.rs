@@ -1,11 +1,13 @@
 //! 명령줄 도구(`capture_tool`)와 트레이 상주 프로그램(`capture_tool_tray`)이 함께 쓰는 코드.
 
+pub mod annotate;
 pub mod autostart;
 pub mod capture;
 pub mod config;
 pub mod flash;
 pub mod history;
 pub mod history_window;
+pub mod ocr;
 pub mod output;
 pub mod overlay;
 pub mod state;

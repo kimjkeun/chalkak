@@ -72,6 +72,14 @@ impl CopyMode {
     }
 }
 
+/// 글자를 클립보드에 올린다.
+pub fn copy_text(text: &str) -> Result<()> {
+    arboard::Clipboard::new()
+        .context("클립보드를 열지 못했습니다")?
+        .set_text(text)
+        .context("클립보드에 복사하지 못했습니다")
+}
+
 /// 파일 경로만 클립보드에 올린다. 이미지를 읽을 필요가 없을 때 쓴다.
 pub fn copy_path(path: &Path) -> Result<()> {
     arboard::Clipboard::new()
