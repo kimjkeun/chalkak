@@ -82,6 +82,7 @@ Windows 10/11 (64비트)에서 동작합니다. 별도로 설치할 프로그램
 |---|---|---|
 | `save_dir` | 비어 있음 (`사진\Captures`) | 저장 폴더 |
 | `copy` | `"image"` | 캡쳐 직후 클립보드에 올릴 것: `image`, `path`, `none` |
+| `sound` | `true` | 캡쳐할 때 "찰칵" 효과음을 낼지 |
 | `history_size` | `20` | 편집기 목록에 보일 캡쳐 수 |
 | `history_layout` | `"right"` | 캡쳐 목록 위치: `right`, `top` |
 | `text_history_size` | `30` | 기억할 복사 텍스트 수 |

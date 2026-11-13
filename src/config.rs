@@ -23,6 +23,9 @@ save_dir = ''
 #   "none"  : 올리지 않음
 copy = "image"
 
+# 캡쳐할 때 "찰칵" 효과음을 낼지 (true / false).
+sound = true
+
 # 히스토리 창에 보여 줄 최근 캡쳐 개수 (1~100).
 history_size = 20
 
@@ -49,6 +52,7 @@ text_history = "Ctrl+Alt+Q"  # 복사한 텍스트 히스토리
 pub struct Config {
     save_dir: String,
     pub copy: CopyMode,
+    pub sound: bool,
     pub history_size: usize,
     pub history_layout: HistoryLayout,
     pub text_history_size: usize,
@@ -78,6 +82,7 @@ impl Default for Config {
         Self {
             save_dir: String::new(),
             copy: CopyMode::Image,
+            sound: true,
             history_size: 20,
             history_layout: HistoryLayout::Right,
             text_history_size: 30,
@@ -171,6 +176,8 @@ mod tests {
     #[test]
     fn bad_values_are_rejected() {
         assert!(Config::parse("copy = \"jpg\"").is_err());
+        assert!(Config::parse("sound = \"on\"").is_err());
+        assert!(!Config::parse("sound = false").unwrap().sound);
         assert!(Config::parse("history_size = 0").is_err());
         assert!(Config::parse("history_size = 101").is_err());
         assert!(Config::parse("text_history_size = 0").is_err());

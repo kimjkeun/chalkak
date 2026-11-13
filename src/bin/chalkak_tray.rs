@@ -28,7 +28,7 @@ use chalkak::text_history_window::{TextHistoryWindow, TextOutcome};
 use chalkak::output::{self, CopyMode};
 use chalkak::overlay::{self, Canvas, Outcome, Overlay};
 use chalkak::pin::PinWindow;
-use chalkak::{autostart, capture, capture_canvas, crop_from_canvas, ocr, state};
+use chalkak::{autostart, capture, capture_canvas, crop_from_canvas, ocr, sound, state};
 
 const APP_NAME: &str = "찰칵";
 
@@ -400,6 +400,9 @@ impl App {
     fn finish(&mut self, image: &RgbaImage) -> Result<()> {
         let path = output::save_to_dir(image, &self.config.save_dir()?)?;
         output::copy(self.config.copy, image, &path)?;
+        if self.config.sound {
+            sound::play_shutter();
+        }
         if let (Some(tray), Some(name)) = (&self.tray, path.file_name()) {
             let _ = tray.set_tooltip(Some(format!(
                 "{APP_NAME}\n마지막 캡쳐: {}",

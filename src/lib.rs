@@ -11,6 +11,7 @@ pub mod ocr;
 pub mod output;
 pub mod overlay;
 pub mod pin;
+pub mod sound;
 pub mod state;
 pub mod text_history;
 pub mod text_history_window;
